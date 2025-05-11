@@ -3,27 +3,22 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1.0">
-  <title>BT-45C Object Caption</title>
+  <title>BT-45C 複数カメラ対応物体キャプション</title>
   <style>
-    /* 背景を黒に */
     body, html {
       margin: 0;
       padding: 0;
       height: 100%;
       overflow: hidden;
-      background-color: #000;
+      background-color: #000; /* 背景黒 */
     }
-    /* カメラ映像は非表示に */
-    video {
-      display: none;
-    }
-    /* オーバーレイ用キャンバスは全画面 */
+    /* カメラ映像は非表示 */
+    video { display: none; }
+    /* Canvas は全画面 */
     canvas {
       position: absolute;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
       object-fit: cover;
     }
     /* キャプション */
@@ -36,50 +31,100 @@
       color: #fff;
       text-shadow: 0 0 5px #000;
     }
+    /* カメラ選択セレクト */
+    #cameraSelect {
+      position: absolute;
+      top: 10px; right: 10px;
+      z-index: 10;
+      font-size: 1em;
+      padding: 4px;
+    }
   </style>
 </head>
 <body>
-  <!-- 非表示の video -->
+  <!-- カメラ選択 -->
+  <select id="cameraSelect"></select>
+
+  <!-- 非表示 video -->
   <video id="video" autoplay playsinline></video>
-  <!-- バウンディングボックスやドット描画用 -->
   <canvas id="overlay"></canvas>
   <div id="caption">モデル読み込み中…</div>
 
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.9.0"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.2"></script>
-
   <script>
-    async function main() {
-      const video   = document.getElementById('video');
-      const canvas  = document.getElementById('overlay');
-      const ctx     = canvas.getContext('2d');
-      const caption = document.getElementById('caption');
+    async function enumerateCameras() {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const videoInputs = devices.filter(d => d.kind === 'videoinput');
+      const select = document.getElementById('cameraSelect');
+      videoInputs.forEach((d, i) => {
+        const option = document.createElement('option');
+        option.value = d.deviceId;
+        // ラベルが取得できない場合もあるので fallback
+        option.text = d.label || `Camera ${i+1}`;
+        select.appendChild(option);
+      });
+      return videoInputs.length ? videoInputs[0].deviceId : null;
+    }
 
-      // カメラ起動（映像は非表示）
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+    async function startStream(deviceId) {
+      // 既存ストリームがあれば停止
+      if (window.currentStream) {
+        window.currentStream.getTracks().forEach(t => t.stop());
+      }
+      const constraints = { video: { deviceId: { exact: deviceId } } };
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      window.currentStream = stream;
+      const video = document.getElementById('video');
       video.srcObject = stream;
       await new Promise(res => video.onloadedmetadata = res);
+      return video;
+    }
 
-      // キャンバスを video サイズに合わせる
-      canvas.width  = video.videoWidth;
-      canvas.height = video.videoHeight;
+    async function main() {
+      const video = document.getElementById('video');
+      const canvas = document.getElementById('overlay');
+      const ctx = canvas.getContext('2d');
+      const caption = document.getElementById('caption');
+      const select = document.getElementById('cameraSelect');
 
+      // カメラ一覧取得＆初期化
+      const initialDeviceId = await enumerateCameras();
+      if (!initialDeviceId) {
+        caption.textContent = 'カメラが見つかりません';
+        return;
+      }
+
+      // モデル読み込み
       const model = await cocoSsd.load();
       caption.textContent = 'モデル読み込み完了';
 
+      // 選択変更時にストリームを切り替え
+      select.addEventListener('change', async () => {
+        await startStream(select.value);
+        // キャンバスサイズ調整
+        canvas.width  = video.videoWidth;
+        canvas.height = video.videoHeight;
+      });
+
+      // 最初のストリーム開始
+      await startStream(initialDeviceId);
+      canvas.width  = video.videoWidth;
+      canvas.height = video.videoHeight;
+
+      // 検出ループ
       setInterval(async () => {
         const predictions = await model.detect(video);
         ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-        // 中心点表示
-        const cx = canvas.width  / 2;
-        const cy = canvas.height / 2;
+        // 中心点描画
+        const cx = canvas.width/2, cy = canvas.height/2;
         ctx.fillStyle = 'red';
         ctx.beginPath();
         ctx.arc(cx, cy, 6, 0, 2*Math.PI);
         ctx.fill();
 
-        // 中心内の物体を抽出
+        // 中心内で最高スコアの物体を選択
         let best = null;
         predictions.forEach(p => {
           const [x,y,w,h] = p.bbox;
